@@ -3,15 +3,26 @@ import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.*;
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.SSLServerSocketFactory;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
+import java.security.GeneralSecurityException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.spec.InvalidKeySpecException;
 import java.sql.*;
 import java.time.Instant;
+import java.util.Objects;
 
 public class Serveur {
     private static DataOutputStream dataOutputStream = null;
     private static DataInputStream dataInputStream = null;
+    private static SecretKey  secretKey;
 
     public static void main(String[] args) throws IOException {
         String keystore = "mykeystore.jks";
@@ -31,15 +42,24 @@ public class Serveur {
                     dataOutputStream = new DataOutputStream(clientSocket.getOutputStream());
 
                     String username = dataInputStream.readUTF();
-                    System.out.println("Reception username");
+                    String password = dataInputStream.readUTF();
                     String hashedPassword = getHashedPassword(username);
-                    dataOutputStream.writeUTF(hashedPassword);
+                    secretKey = HashingPassword.stringToKey(hashedPassword, "AES");
+                    assert hashedPassword != null;
+                    boolean isAuthentificated = HashingPassword.validatePassword(password, hashedPassword, HashingPassword.decodeSalt(getSalt(username)),1000);
+
+                    if(isAuthentificated) {
+                        dataOutputStream.writeUTF("Connecté");
+                    }
+                    else {
+                        dataOutputStream.writeUTF("Non Connecté");
+                    }
 
                     String requestType = dataInputStream.readUTF();
                     String baseDirectory = dataInputStream.readUTF();
 
                     if (requestType.equals("RESTORE")) {
-                        sendFilesToClient(username, baseDirectory);
+                        sendFilesToClient(username, baseDirectory, HashingPassword.stringToKey(hashedPassword, "AES"));
                     } else {
                         sendLastBackupTimeToClient(username);
                         receiveFiles(username);
@@ -78,6 +98,21 @@ public class Serveur {
         }
         return null;
     }
+    private static String getSalt(String username) {
+        try (Connection conn = connectToDB();
+             PreparedStatement pstmt = conn.prepareStatement("SELECT salt FROM users WHERE username = ?")) {
+            pstmt.setString(1, username);
+            ResultSet rs = pstmt.executeQuery();
+
+            if (rs.next()) {
+                String salt = rs.getString("salt");
+                return salt;
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
 
     private static void receiveFiles(String clientName) throws IOException {
         File clientDir = new File(clientName);
@@ -86,56 +121,86 @@ public class Serveur {
         }
         String relativePath = dataInputStream.readUTF();
         while (!relativePath.equals("END")) {
-
-            File destinationFile = new File(clientDir, relativePath);
             long fileSize = dataInputStream.readLong();
-            if (!destinationFile.exists() || destinationFile.length() != fileSize) {
-                receiveFile(destinationFile, fileSize);
-            }
+            File destinationFile = new File(clientDir, relativePath);
+            System.out.println("Chemin du fichier sur le serveur: " + destinationFile.getAbsolutePath());
+
+            receiveAndEncryptFile(destinationFile, fileSize);
             relativePath = dataInputStream.readUTF();
         }
     }
 
-    private static void receiveFile(File file, long fileSize) throws IOException {
-        file.getParentFile().mkdirs();
-
-        try (FileOutputStream fileOutputStream = new FileOutputStream(file)) {
-            byte[] buffer = new byte[4 * 1024];
-            int bytes;
-            while (fileSize > 0) {
-                int encryptedDataLength = dataInputStream.readInt();
-                if (encryptedDataLength > buffer.length) {
-                    buffer = new byte[encryptedDataLength];
-                }
-                dataInputStream.readFully(buffer, 0, encryptedDataLength);
-                fileOutputStream.write(buffer, 0, encryptedDataLength);
-                fileSize -= encryptedDataLength;
-            }
+    private static void receiveAndEncryptFile(File file, long fileSize) throws IOException {
+        // Créer les dossiers parents s'ils n'existent pas
+        File parentDir = file.getParentFile();
+        if (!parentDir.exists()) {
+            parentDir.mkdirs();
         }
-        System.out.println("File " + file.getName() + " received and saved.");
+
+        // Créer le fichier s'il n'existe pas
+        if (!file.exists()) {
+            file.createNewFile();
+        }
+
+        // Continuer avec la réception et le chiffrement du fichier
+        byte[] buffer = new byte[4 * 1024];
+        int bytes;
+        ByteArrayOutputStream fileContent = new ByteArrayOutputStream();
+
+        while (fileSize > 0 && (bytes = dataInputStream.read(buffer, 0, Math.min(buffer.length, (int) fileSize))) != -1) {
+            fileContent.write(buffer, 0, bytes);
+            fileSize -= bytes;
+        }
+
+        byte[] encryptedData = encryptData(fileContent.toByteArray(), secretKey);
+        try (FileOutputStream fos = new FileOutputStream(file)) {
+            fos.write(encryptedData);
+        }
     }
 
-    private static void sendFilesToClient(String clientName, String restorePath) throws IOException {
+
+    private static byte[] encryptData(byte[] data, SecretKey key) {
+        try {
+            Cipher cipher = Cipher.getInstance("AES");
+            cipher.init(Cipher.ENCRYPT_MODE, key);
+            return cipher.doFinal(data);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    private static byte[] decryptData(byte[] data, SecretKey key) throws GeneralSecurityException {
+        Cipher cipher = Cipher.getInstance("AES");
+        cipher.init(Cipher.DECRYPT_MODE, key);
+        return cipher.doFinal(data);
+    }
+
+    private static void sendFilesToClient(String clientName, String restorePath, SecretKey key) throws IOException {
         Path clientDir = Paths.get(clientName);
         if (Files.exists(clientDir)) {
             Files.walk(clientDir)
                     .filter(Files::isRegularFile)
                     .forEach(file -> {
                         try {
+                            // Lire et déchiffrer le fichier
                             byte[] fileData = Files.readAllBytes(file);
+                            byte[] decryptedData = decryptData(fileData, key);
 
+                            // Envoyer le nom du fichier et les données déchiffrées
                             String relativePath = clientDir.relativize(file).toString();
-                            dataOutputStream.writeUTF(relativePath);
-                            dataOutputStream.writeInt(fileData.length);
-                            dataOutputStream.write(fileData);
-                        } catch (IOException e) {
+                            dataOutputStream.writeUTF(relativePath); // Envoyer d'abord le nom
+                            dataOutputStream.writeLong(decryptedData.length); // Puis la taille
+                            dataOutputStream.write(decryptedData); // Enfin les données
+                        } catch (IOException | GeneralSecurityException e) {
+                            System.err.println("Erreur lors de l'envoi du fichier: " + file);
                             e.printStackTrace();
                         }
                     });
             dataOutputStream.writeUTF("END");
         } else {
             dataOutputStream.writeUTF("END");
-            System.out.println("No files to restore for client: " + clientName);
+            System.out.println("Aucun fichier à restaurer pour le client: " + clientName);
         }
     }
 
