@@ -1,23 +1,14 @@
 package org.example;
 import java.io.*;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.*;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.SSLServerSocketFactory;
 import javax.net.ssl.SSLServerSocket;
-import javax.net.ssl.SSLSocket;
 import java.security.GeneralSecurityException;
-import java.security.NoSuchAlgorithmException;
-import java.security.SecureRandom;
-import java.security.spec.InvalidKeySpecException;
 import java.sql.*;
 import java.time.Instant;
-import java.util.Objects;
 
 public class Serveur {
     private static DataOutputStream dataOutputStream = null;
@@ -78,11 +69,21 @@ public class Serveur {
         }
     }
 
+    /**
+     * Effectue la connection à la base de donnée
+     * @return
+     * @throws SQLException
+     */
     private static Connection connectToDB() throws SQLException {
         String url = "jdbc:sqlite:users.db"; // Chemin vers votre base de données SQLite
         return DriverManager.getConnection(url);
     }
 
+    /**
+     * Récupère le mot de passe hashé de la base de donnée
+     * @param username
+     * @return
+     */
     private static String getHashedPassword(String username) {
         try (Connection conn = connectToDB();
              PreparedStatement pstmt = conn.prepareStatement("SELECT password FROM users WHERE username = ?")) {
@@ -98,6 +99,12 @@ public class Serveur {
         }
         return null;
     }
+
+    /**
+     * Récupère le sel de la base de données
+     * @param username
+     * @return
+     */
     private static String getSalt(String username) {
         try (Connection conn = connectToDB();
              PreparedStatement pstmt = conn.prepareStatement("SELECT salt FROM users WHERE username = ?")) {
@@ -114,6 +121,11 @@ public class Serveur {
         return null;
     }
 
+    /**
+     * Gère la réception et l'enregistrement des fichiers envoyés par des clients
+     * @param clientName
+     * @throws IOException
+     */
     private static void receiveFiles(String clientName) throws IOException {
         File clientDir = new File(clientName);
         if (!clientDir.exists()) {
@@ -130,6 +142,12 @@ public class Serveur {
         }
     }
 
+    /**
+     * Gère le chiffrement des données reçus
+     * @param file
+     * @param fileSize
+     * @throws IOException
+     */
     private static void receiveAndEncryptFile(File file, long fileSize) throws IOException {
         // Créer les dossiers parents s'ils n'existent pas
         File parentDir = file.getParentFile();
@@ -158,7 +176,12 @@ public class Serveur {
         }
     }
 
-
+    /**
+     * Gère le chiffrements des datas
+     * @param data
+     * @param key
+     * @return
+     */
     private static byte[] encryptData(byte[] data, SecretKey key) {
         try {
             Cipher cipher = Cipher.getInstance("AES");
@@ -170,12 +193,26 @@ public class Serveur {
         return null;
     }
 
+    /**
+     * Gère de le déchiffrements des données
+     * @param data
+     * @param key
+     * @return
+     * @throws GeneralSecurityException
+     */
     private static byte[] decryptData(byte[] data, SecretKey key) throws GeneralSecurityException {
         Cipher cipher = Cipher.getInstance("AES");
         cipher.init(Cipher.DECRYPT_MODE, key);
         return cipher.doFinal(data);
     }
 
+    /**
+     * Envoie les fichiers de chaque client lors d'une restauration
+     * @param clientName
+     * @param restorePath
+     * @param key
+     * @throws IOException
+     */
     private static void sendFilesToClient(String clientName, String restorePath, SecretKey key) throws IOException {
         Path clientDir = Paths.get(clientName);
         if (Files.exists(clientDir)) {
@@ -204,6 +241,11 @@ public class Serveur {
         }
     }
 
+    /**
+     * Envoie la date de dernière sauvegarde au client
+     * @param username
+     * @throws IOException
+     */
     private static void sendLastBackupTimeToClient(String username) throws IOException {
         try {
             Instant lastBackupTime = readLastBackupTimeFromDB(username);
@@ -214,6 +256,12 @@ public class Serveur {
         }
     }
 
+    /**
+     * Récupère la date de dernière sauvegarde dans la base de données
+     * @param username
+     * @return
+     * @throws SQLException
+     */
     private static Instant readLastBackupTimeFromDB(String username) throws SQLException {
         try (Connection conn = connectToDB();
              PreparedStatement pstmt = conn.prepareStatement("SELECT last_backup FROM users WHERE username = ?")) {
@@ -233,6 +281,11 @@ public class Serveur {
         // ancienne
     }
 
+    /**
+     * Mets à jour la date de dernière sauvegarde dans la base de données
+     * @param username
+     * @throws SQLException
+     */
     private static void updateLastBackupTimeInDB(String username) throws SQLException {
         try (Connection conn = connectToDB();
              PreparedStatement pstmt = conn
